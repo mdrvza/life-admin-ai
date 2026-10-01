@@ -1,0 +1,64 @@
+name: AWS staging access check (no deployment)
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-staging-access-check
+  cancel-in-progress: false
+
+jobs:
+  identity-only:
+    if: github.repository == 'mdrvza/life-admin-ai' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-south-1
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_PAGER: ""
+    steps:
+      - name: Checkout reviewed code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Obtain short-lived discovery credentials
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: arn:aws:iam::005314670455:role/family-life-os-staging-discovery
+          role-session-name: staging-discovery-${{ github.run_id }}
+          role-duration-seconds: 900
+          aws-region: ap-south-1
+          allowed-account-ids: "005314670455"
+          unset-current-credentials: true
+          output-credentials: false
+      - name: Assert actual AWS account and role
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity --region ap-south-1 --output json > "$RUNNER_TEMP/staging-identity.json"
+          python3 scripts/aws/check-staging-identity.py "$RUNNER_TEMP/staging-identity.json" > "$RUNNER_TEMP/staging-access-result.json"
+          cat "$RUNNER_TEMP/staging-access-result.json"
+          {
+            echo '## AWS staging access check'
+            echo 'This run called AWS STS. It does not deploy resources or prove application flows.'
+            echo '```json'
+            cat "$RUNNER_TEMP/staging-access-result.json"
+            echo '```'
+            echo 'OTP/JWT, authenticated API, uploads, ClamAV/S3, oversized rejection, frontend connectivity and application health: **NOT EXECUTED**.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Read only the bootstrap stack status
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region ap-south-1 \
+            --stack-name family-life-os-staging-access-bootstrap \
+            --query 'Stacks[].{Name:StackName,Status:StackStatus}' \
+            --output json
