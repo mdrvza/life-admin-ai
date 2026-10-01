@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Administrator-applied, metadata-only staging access bootstrap. This is not
+  a provisioning role and cannot create infrastructure or deploy production.
+
+Parameters:
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Set true only if this account does not already have the GitHub OIDC provider.
+
+Rules:
+  ApprovedTarget:
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::AccountId", "005314670455"]
+        AssertDescription: Apply only in the approved staging AWS account.
+      - Assert: !Equals [!Ref "AWS::Region", ap-south-1]
+        AssertDescription: Apply only in Mumbai (ap-south-1).
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      Tags:
+        - Key: Application
+          Value: family-life-os
+        - Key: Environment
+          Value: staging
+
+  StagingDiscoveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: family-life-os-staging-discovery
+      Description: Identity and named staging metadata only; no resource creation, secrets, or object access.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:mdrvza@308700480/life-admin-ai@1399300021:environment:staging
+      Policies:
+        - PolicyName: MetadataOnlyNeverProvision
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyAllNonDiscoveryActions
+                Effect: Deny
+                NotAction:
+                  - sts:GetCallerIdentity
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStackResources
+                  - eks:DescribeCluster
+                  - secretsmanager:DescribeSecret
+                Resource: "*"
+              - Sid: DenyOtherRegions
+                Effect: Deny
+                NotAction: sts:GetCallerIdentity
+                Resource: "*"
+                Condition:
+                  StringNotEquals:
+                    aws:RequestedRegion: ap-south-1
+              - Sid: NamedStagingStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStackResources
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:ap-south-1:${AWS::AccountId}:stack/family-life-os-staging-*/*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: ap-south-1
+              - Sid: NamedStagingCluster
+                Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !Sub "arn:${AWS::Partition}:eks:ap-south-1:${AWS::AccountId}:cluster/family-life-os-staging"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: ap-south-1
+              - Sid: StagingSecretMetadataNotValue
+                Effect: Allow
+                Action: secretsmanager:DescribeSecret
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:ap-south-1:${AWS::AccountId}:secret:family-life-os/staging/application-??????"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: ap-south-1
+      Tags:
+        - Key: Application
+          Value: family-life-os
+        - Key: Environment
+          Value: staging
+
+Outputs:
+  StagingDiscoveryRoleArn:
+    Value: !GetAtt StagingDiscoveryRole.Arn
+  ExpectedGitHubSubject:
+    Value: repo:mdrvza@308700480/life-admin-ai@1399300021:environment:staging
+  ProvisioningPermissions:
+    Description: Administrator-reviewed resource-specific execution access is a separate step.
+    Value: NONE
